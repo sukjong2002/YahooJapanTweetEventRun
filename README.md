@@ -1,1 +1,1 @@
-# YahooJapanTweetEventRun
+# Yahoo Japan 주회방 도우미
