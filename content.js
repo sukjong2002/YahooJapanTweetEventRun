@@ -237,6 +237,9 @@ function updateTweetWithGeminiResult(container, geminiResult) {
       
       // 번역된 노래 유형 가져오기
       const songTypeText = songTypeMap[tweetData.songType] || tweetData.songType || '-';
+
+      console.log(tweetData);
+      
       
       // 스타일 추가
       const style = document.createElement('style');

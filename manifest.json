@@ -2,17 +2,12 @@
     "manifest_version": 3,
     "name": "Yahoo Japan 주회방 도우미",
     "description": "Yahoo Japan 실시간 검색 트윗을 Gemini API로 분석합니다",
-    "version": "1.0",
+    "version": "1.15",
     "icons": {
         "128": "icon128.png"
       },
     "permissions": [
-      "activeTab",
       "storage"
-    ],
-    "host_permissions": [
-      "https://search.yahoo.co.jp/*",
-      "https://generativelanguage.googleapis.com/*"
     ],
     "background": {
       "service_worker": "background.js"

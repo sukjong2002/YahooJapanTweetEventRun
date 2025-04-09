@@ -98,7 +98,8 @@ async function processWithGemini(text) {
                 "masterStat",
                 "reqStat",
                 "songType",
-                "masterTotalStat"
+                "masterTotalStat",
+                "reqTotalStat"
               ]
             }
           }
