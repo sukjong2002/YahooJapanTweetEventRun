@@ -1,6 +1,33 @@
 // 이미 처리된 엔트리 추적
 const processedEntries = new Set();
 
+// DOM 변동 과도 시 API 호출을 줄이기 위한 디바운스 큐
+const pendingContainers = new Set();
+const MUTATION_DEBOUNCE_MS = 300; // 200~500ms 권장 범위 중간값
+
+function debounce(fn, delay) {
+  let timer = null;
+  return function (...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delay);
+  };
+}
+
+const flushPendingContainers = () => {
+  if (pendingContainers.size === 0) return;
+  const list = Array.from(pendingContainers);
+  pendingContainers.clear();
+  list.forEach((container) => {
+    try {
+      processTweetContainer(container);
+    } catch (e) {
+      console.error("대기중 컨테이너 처리 중 오류:", e);
+    }
+  });
+};
+
+const debouncedFlushPending = debounce(flushPendingContainers, MUTATION_DEBOUNCE_MS);
+
 // 페이지 로드 시 초기화 함수
 function initialize() {
   // 현재 존재하는 모든 트윗 ID를 처리됨으로 표시 (무시하기 위함)
@@ -55,8 +82,7 @@ function setupMutationObserver() {
   const targetNode = document.getElementById("autosr");
 
   if (!targetNode) {
-    console.log("#autosr 요소를 찾을 수 없습니다. 1초 후 다시 시도합니다.");
-    setTimeout(setupMutationObserver, 1000);
+    console.log("#autosr 요소를 찾을 수 없습니다.");
     return;
   }
 
@@ -74,8 +100,9 @@ function setupMutationObserver() {
             node.nodeType === Node.ELEMENT_NODE &&
             node.classList.contains("Tweet_TweetContainer__aezGm")
           ) {
-            console.log("새 트윗 컨테이너 발견:", node);
-            processTweetContainer(node);
+            console.log("새 트윗 컨테이너 발견(대기열 추가):", node);
+            pendingContainers.add(node);
+            debouncedFlushPending();
           }
           // 추가된 노드가 Element이고 트윗 컨테이너를 포함할 수 있는 경우
           else if (node.nodeType === Node.ELEMENT_NODE) {
@@ -84,9 +111,10 @@ function setupMutationObserver() {
             );
             if (tweetContainers.length > 0) {
               console.log(
-                `추가된 노드 내에서 ${tweetContainers.length}개의 새 트윗 컨테이너 발견`
+                `추가된 노드 내에서 ${tweetContainers.length}개의 새 트윗 컨테이너 발견(대기열 추가)`
               );
-              Array.from(tweetContainers).forEach(processTweetContainer);
+              Array.from(tweetContainers).forEach((el) => pendingContainers.add(el));
+              debouncedFlushPending();
             }
           }
         });
@@ -259,6 +287,7 @@ function updateTweetWithGeminiResult(container, geminiResult) {
       envy: "엔비",
       fast_envy: "고속 엔비",
       lostAndFound: "로앤파",
+      mv: "뮤비방",
       random: "랜덤",
     };
 
@@ -266,7 +295,11 @@ function updateTweetWithGeminiResult(container, geminiResult) {
     const songTypeText =
       songTypeMap[tweetData.songType] || tweetData.songType || "-";
 
-    console.log(tweetData);
+  console.log(tweetData);
+
+  // 원본 트윗 링크 추출 (.Tweet_time__GS_jw 내 a 태그)
+  const timeLinkEl = container.querySelector(".Tweet_time__GS_jw a");
+  const originalTweetUrl = timeLinkEl ? timeLinkEl.href : null;
 
     // 스타일 추가
     const style = document.createElement("style");
@@ -378,6 +411,23 @@ function updateTweetWithGeminiResult(container, geminiResult) {
           color: #657786;
           margin-top: 4px;
         }
+        .original-link {
+          grid-column: 1 / -1;
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 4px;
+        }
+        .original-link a {
+          font-size: 12px;
+          color: #1da1f2;
+          text-decoration: none;
+          border: 1px solid #1da1f2;
+          border-radius: 12px;
+          padding: 2px 8px;
+        }
+        .original-link a:hover {
+          background-color: #e8f5fe;
+        }
       `;
 
     // 디자인 템플릿 생성
@@ -439,6 +489,11 @@ function updateTweetWithGeminiResult(container, geminiResult) {
               ${songTypeText}
             </span>
           </div>
+          ${
+            originalTweetUrl
+              ? `<div class="original-link"><a href="${originalTweetUrl}" target="_blank" rel="noopener noreferrer">원본 트윗 보기</a></div>`
+              : ""
+          }
         </div>
       `;
 

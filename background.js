@@ -1,6 +1,56 @@
 // Gemini API 키 저장 변수
 let GEMINI_API_KEY = "";
 
+// API 설정 상수들을 별도로 분리
+const GEMINI_CONFIG = {
+  MODEL_ID: "gemini-2.0-flash-lite",
+  GENERATE_CONTENT_API: "generateContent",
+  
+  // 시스템 인스트럭션 (재사용 가능하도록 분리)
+  SYSTEM_INSTRUCTION: {
+    parts: [
+      {
+        text: 'あなたは日本語の募集ツイート解析アシスタントです。入力テキストから以下の項目を正確に抽出し、指定のJSONスキーマに厳密に従って返してください。返答は必ずJSONのみで、説明文を含めないでください。\n\n抽出ルール: \n1) keyNumber (部屋番号)\n- 5桁の数字 (先頭0許可)。🗝, 鍵, 🔑 の直後、または単独行に出現することが多い。\n- 5桁以外の数字列は無視。\n\n2) peopleRn (人数)\n- "@n" / "＠n" / "@ n" / "＠ n" の数値nを抽出 (1〜4程度が多い)。\n- 人数に関係ない"5人", "あと2" などは除外。\n\n3) masterStat (主ステ) と masterTotalStat\n- キーワード: 主, 先頭, ホスト。直後または同一行の数値(例: 120, 160, 232)。\n- "実効値"があればその数値を優先。\n- 数値>160 または "実効値" を含む → masterTotalStat=true。\n- "先頭"のみ明示 → masterTotalStat=false。\n- "スコアアップ"or"星4"のみ → 100 とみなす。複数値は最大値を採用。\n\n4) reqStat (募集/条件) と reqTotalStat\n- キーワード: 募, 求, 条件。直後(同一行)の数値を抽出。\n- ルールは masterStat と同様。複数値は最大値。\n\n5) songType\n- 優先順位で一意に決定: \n  a. "高速" が 🦐/エビ/えび の直前にある → fast_envy\n  b. "ベテラン" を含む → sage\n  c. 🦐, エビ, えび を含む → envy\n  d. ロスエン/ロスエンド/ロストエンド を含む → lostAndFound\n  e. おまかせ/ランダム を含む → random\n  f. mv/👗 を含む → mv\n\n6) 時間/回数\n- "周回" を含む → unlimited=true。\n- "n時[mm分]まで" → unlimited=true, until="{n}時{mm分}" (例: 23時45分)。\n- "n回" → unlimited=false, until="{n}回" (回数以外のnは除外)。\n\n出力要件: \n- いずれかが欠ける場合(有効な5桁keyNumber / 有効なsongType / 有効なreqStat)は tweets を空配列[]で返す。\n- 数値は数字として。百分率表記(%)は除去。矢印(↑↓)や単位(万)は無視し数値のみ抽出。\n- 曖昧な場合は推測せず、その項目を出力しないのではなく tweets=[] とする。\n\n例1 入力:\n🦐 えび エビ周回\n@ 2\n\n11564\n\n主…先頭120%\n募…先頭120%\n\n出力:\n{"tweets":[{"keyNumber":"11564","peopleRn":2,"masterStat":120,"reqStat":120,"songType":"envy","unlimited":true,"masterTotalStat":false,"reqTotalStat":false}]}\n\n例2 入力:\nベテラン 高速🦐周回 23時45分まで 🗝02292 @33 主 232 (実効値) 求 215↑\n\n出力:\n{"tweets":[{"keyNumber":"02292","peopleRn":3,"masterStat":232,"reqStat":215,"songType":"fast_envy","unlimited":true,"masterTotalStat":true,"reqTotalStat":true,"until":"23時45分"}]}'
+      },
+    ],
+  },
+  
+  // 생성 설정 (재사용 가능하도록 분리)
+  GENERATION_CONFIG: {
+    responseMimeType: "application/json",
+    responseSchema: {
+      type: "object",
+      properties: {
+        tweets: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              keyNumber: { type: "string" },
+              peopleRn: { type: "integer" },
+              masterStat: { type: "number" },
+              reqStat: { type: "number" },
+              songType: { type: "string" },
+              unlimited: { type: "boolean" },
+              masterTotalStat: { type: "boolean" },
+              reqTotalStat: { type: "boolean" },
+              until: { type: "string" },
+            },
+            required: [
+              "keyNumber",
+              "masterStat",
+              "reqStat",
+              "songType",
+              "masterTotalStat",
+              "reqTotalStat",
+            ]
+          },
+        },
+      },
+    },
+  }
+};
+
 // 콘텐츠 스크립트에서 메시지 수신
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "processWithGemini") {
@@ -29,85 +79,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Gemini API로 텍스트 처리 (generateContent 사용)
-async function processWithGemini(text) {
-  // 모델 및 API 엔드포인트 설정
-  const MODEL_ID = "gemini-2.0-flash-lite";
-  const GENERATE_CONTENT_API = "generateContent";
+// API URL 생성 함수
+function getGeminiApiUrl() {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CONFIG.MODEL_ID}:${GEMINI_CONFIG.GENERATE_CONTENT_API}?key=${GEMINI_API_KEY}`;
+}
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:${GENERATE_CONTENT_API}?key=${GEMINI_API_KEY}`;
-
-  // 요청 데이터 구성
-  const requestData = {
+// 요청 데이터 생성 함수 (텍스트만 변경되는 부분)
+function createRequestData(text) {
+  return {
     contents: [
       {
         role: "user",
         parts: [
           {
-            text: text, // 트윗 내용
+            text: text, // 트윗 내용만 동적으로 변경
           },
         ],
       },
     ],
-    systemInstruction: {
-      parts: [
-        {
-          text: '다음은 일본어로 작성된 모집 공고입니다. 아래 규칙을 따라 정보를 추출하고 지정된 출력 형식으로 반환하세요.\n\n규칙\n1. 방 번호 (keyNumber)\n\n5자리 숫자로 구성된 방 번호를 추출하세요.\n\n🔑 이모지 또는 아무런 기호 없이 새로운 줄로 시작할 수 있습니다.\n\n2. 인원 (peopleRn)\n\n"@n" 형태로 표현된 숫자를 추출하세요.\n\n예: "@ 2" → 2, "@3" → 3\n\n3. 주 스탯 (masterStat)\n\n"主" 뒤에 나오는 3자리 숫자를 추출하세요.\n"実効値"가 포함된 경우 해당 값을 우선적으로 선택하세요.\n\n값이 160을 넘는 경우, 또는 "実効値"가 포함된 경우 masterTotalStat을 true로 설정하세요.\n\n"先頭"이 포함된 경우 masterTotalStat을 false로 설정하세요.\n\n"主" 값이 여러 개 나타날 경우 가장 높은 숫자를 선택하세요.\n\n숫자가 없이 "スコアアップ" 라고 적혀 있는 경우 100으로 설정하세요.\n\n4. 모집 스탯 (reqStat)\n\n"募" 또는 "求" 뒤에 나오는 3자리 숫자를 추출하세요.\n\n"実効値"가 포함된 경우 해당 값을 우선적으로 선택하세요.\n\n값이 160을 넘는 경우, 또는 "実効値"가 포함된 경우 reqTotalStat을 true로 설정하세요.\n\n"募" 또는 "求" 값이 여러 개 나타날 경우 가장 높은 숫자를 선택하세요.\n\n숫자가 없이 "スコアアップ" 라고 적혀 있는 경우 100으로 설정하세요.\n\n5. 노래 유형 (songType)\n다음 우선순위에 따라 노래 유형을 결정하세요:\n\n高速이 🦐/エビ/えび 앞에 붙어 있는 경우 → "fast_envy"\n\nベテラン 포함 → "sage"\n\n🦐, エビ, えび 포함 → "envy"\n\nロスエン 포함 → "lostAndFound"\n\nおまかせ 포함 → "random"\n\n6. 시간 조건\n\n"周回"이 포함된 경우 unlimited를 true로 설정하세요.\n\n"n時頃まで" 또는 "n時n分まで" 형태의 시간이 지정된 경우:\nunlimited를 true로 설정하고 시간을 until에 출력하세요.\n예: "23時45分まで" → "23시45분"\n\n"n回" 형태의 판수가 지정된 경우:\nunlimited를 false로 설정하고 판수를 until에 출력하세요.\n예: "5回" → "5판"\n주의: "5人" 또는 あと2 과 같이 횟수가 아닌 다른 값이 나오는 경우를 주의하세요.\n\n7. 규칙 위반 처리\n다음 조건 중 하나라도 만족하지 않으면 빈 배열([])을 반환하세요:\n\n유효한 5자리 keyNumber 존재\n유효한 값 중 하나의 songType 존재\n유효한 모집 조건 reqStat 존재\n\n8: **예시**\n입력:\n🦐 えび エビ周回\\n@ 2\\n\\n11564\\n\\n主…先頭120%\\n募…先頭120%\\n\\n支援さんいます🙇\\n #プロセカ募集  #プロセカ協力\n\n출력:\nkeyNumber: 11564\npeopleRn: 2\nmasterStat: 120\nreqStat: 120\nsongType: envy\nunlimited: true\nmasterTotalStat: false\nreqTotalStat: false\n\n입력:\nベテラン 高速🦐周回　23時45分まで 🗝02292 @33 主 232 (実効値)/ 32.9万 求 215↑ 条件違い解散 SF気にしません スタンプ他部屋と同じ SF後放置◎ いじぺち◎ 集まり悪い場合、条件下げます #プロセカ募集 #プロセカ協力\n\n출력:\nkeyNumber: 02292\npeopleRn: 3\nmasterStat: 232\nreqStat: 215\nsongType: fast_envy\nunlimited: true\nmasterTotalStat: true\nreqTotalStat: true\nuntil: "23시45분"\n',
-        },
-      ],
-    },
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "object",
-        properties: {
-          tweets: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                keyNumber: {
-                  type: "string",
-                },
-                peopleRn: {
-                  type: "integer",
-                },
-                masterStat: {
-                  type: "number",
-                },
-                reqStat: {
-                  type: "number",
-                },
-                songType: {
-                  type: "string",
-                },
-                unlimited: {
-                  type: "boolean",
-                },
-                masterTotalStat: {
-                  type: "boolean",
-                },
-                reqTotalStat: {
-                  type: "boolean",
-                },
-                until: {
-                  type: "string",
-                },
-              },
-              required: [
-                "keyNumber",
-                "masterStat",
-                "reqStat",
-                "songType",
-                "masterTotalStat",
-                "reqTotalStat",
-              ],
-            },
-          },
-        },
-      },
-    },
+    systemInstruction: GEMINI_CONFIG.SYSTEM_INSTRUCTION, // 미리 정의된 설정 재사용
+    generationConfig: GEMINI_CONFIG.GENERATION_CONFIG,   // 미리 정의된 설정 재사용
   };
+}
+
+// Gemini API로 텍스트 처리 (generateContent 사용)
+async function processWithGemini(text) {
+  const url = getGeminiApiUrl();
+  const requestData = createRequestData(text);
 
   try {
     // API 호출
