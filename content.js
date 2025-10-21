@@ -1,32 +1,55 @@
 // 이미 처리된 엔트리 추적
 const processedEntries = new Set();
 
-// DOM 변동 과도 시 API 호출을 줄이기 위한 디바운스 큐
-const pendingContainers = new Set();
-const MUTATION_DEBOUNCE_MS = 300; // 200~500ms 권장 범위 중간값
+// DOM 변동 과도 시 API 호출을 줄이기 위한 rate-limiting 큐
+const pendingContainers = [];
+const MIN_REQUEST_INTERVAL_MS = 300; // 요청 간 최소 간격 (ms)
+let lastRequestTime = 0;
+let processingTimer = null;
 
-function debounce(fn, delay) {
-  let timer = null;
-  return function (...args) {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => fn.apply(this, args), delay);
-  };
-}
+// 요청 전송 시점 기준으로 최소 간격을 보장하는 rate-limiter
+const processNextBatch = () => {
+  if (pendingContainers.length === 0) {
+    processingTimer = null;
+    return;
+  }
 
-const flushPendingContainers = () => {
-  if (pendingContainers.size === 0) return;
-  const list = Array.from(pendingContainers);
-  pendingContainers.clear();
-  list.forEach((container) => {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
+  
+  // 마지막 요청 이후 충분한 시간이 지났으면 즉시 처리
+  if (timeSinceLastRequest >= MIN_REQUEST_INTERVAL_MS) {
+    const container = pendingContainers.shift();
+    lastRequestTime = Date.now(); // 요청 전송 시점 기록
+    
     try {
       processTweetContainer(container);
     } catch (e) {
       console.error("대기중 컨테이너 처리 중 오류:", e);
     }
-  });
+    
+    // 다음 배치 예약
+    if (pendingContainers.length > 0) {
+      processingTimer = setTimeout(processNextBatch, MIN_REQUEST_INTERVAL_MS);
+    } else {
+      processingTimer = null;
+    }
+  } else {
+    // 아직 간격이 부족하면 남은 시간만큼 대기 후 재시도
+    const remainingWait = MIN_REQUEST_INTERVAL_MS - timeSinceLastRequest;
+    processingTimer = setTimeout(processNextBatch, remainingWait);
+  }
 };
 
-const debouncedFlushPending = debounce(flushPendingContainers, MUTATION_DEBOUNCE_MS);
+// 큐에 컨테이너 추가 및 처리 시작
+const enqueueTweetContainer = (container) => {
+  pendingContainers.push(container);
+  
+  // 아직 처리 타이머가 없으면 시작
+  if (!processingTimer) {
+    processNextBatch();
+  }
+};
 
 // 페이지 로드 시 초기화 함수
 function initialize() {
@@ -100,9 +123,8 @@ function setupMutationObserver() {
             node.nodeType === Node.ELEMENT_NODE &&
             node.classList.contains("Tweet_TweetContainer__aezGm")
           ) {
-            console.log("새 트윗 컨테이너 발견(대기열 추가):", node);
-            pendingContainers.add(node);
-            debouncedFlushPending();
+            console.log("새 트윗 컨테이너 발견(큐 추가):", node);
+            enqueueTweetContainer(node);
           }
           // 추가된 노드가 Element이고 트윗 컨테이너를 포함할 수 있는 경우
           else if (node.nodeType === Node.ELEMENT_NODE) {
@@ -111,10 +133,9 @@ function setupMutationObserver() {
             );
             if (tweetContainers.length > 0) {
               console.log(
-                `추가된 노드 내에서 ${tweetContainers.length}개의 새 트윗 컨테이너 발견(대기열 추가)`
+                `추가된 노드 내에서 ${tweetContainers.length}개의 새 트윗 컨테이너 발견(큐 추가)`
               );
-              Array.from(tweetContainers).forEach((el) => pendingContainers.add(el));
-              debouncedFlushPending();
+              Array.from(tweetContainers).forEach((el) => enqueueTweetContainer(el));
             }
           }
         });
